@@ -1,4 +1,4 @@
-import { verifyAudit } from "./audit";
+import { listAudit, verifyAudit } from "./audit";
 import { all, get } from "./db";
 import { nowIso } from "./id";
 import {
@@ -9,6 +9,7 @@ import {
   EvidencePacket,
   EvidencePacketSchema,
   PolicyDecisionSchema,
+  StateDiffSchema,
   ToolCallSchema
 } from "./schemas";
 
@@ -45,8 +46,9 @@ export function exportEvidence(runId: string): EvidencePacket {
   const stateDiffs = all<Record<string, unknown>>(
     "SELECT payload_redacted FROM audit_events WHERE run_id = ? AND type = 'tool_result' ORDER BY sequence ASC",
     [runId]
-  ).map((row) => JSON.parse(String(row.payload_redacted)) as Record<string, unknown>);
+  ).map((row) => StateDiffSchema.parse(JSON.parse(String(row.payload_redacted))));
   const audit = verifyAudit(runId);
+  const auditEvents = listAudit(runId);
 
   return EvidencePacketSchema.parse({
     runSummary: {
@@ -63,6 +65,7 @@ export function exportEvidence(runId: string): EvidencePacket {
     capabilities,
     toolCalls,
     stateDiffs,
+    auditEvents,
     auditRootHash: audit.rootHash,
     generatedAt: nowIso()
   });

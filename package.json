@@ -9,10 +9,13 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "lint": "next lint"
+    "typecheck": "tsc --noEmit --incremental false",
+    "lint": "npm run typecheck",
+    "verify": "npm run lint && npm test && npm run build && npm run test:e2e"
   },
   "dependencies": {
     "better-sqlite3": "^11.10.0",
+    "graphql": "^16.14.2",
     "lucide-react": "^0.468.0",
     "next": "^16.2.7",
     "react": "^19.0.0",

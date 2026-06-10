@@ -3,8 +3,13 @@ import { canonicalJson, digest, newId, nowIso } from "./id";
 import { all, get, run } from "./db";
 
 const GENESIS_HASH = "0".repeat(64);
+let failNextAuditTypeForTest: string | null = null;
 
 export function appendAudit(input: Omit<AuditEvent, "id" | "sequence" | "prevHash" | "hash" | "createdAt">): AuditEvent {
+  if (failNextAuditTypeForTest === input.type) {
+    failNextAuditTypeForTest = null;
+    throw new Error(`Simulated audit append failure for ${input.type}`);
+  }
   const last = get<{ sequence: number; hash: string }>(
     "SELECT sequence, hash FROM audit_events WHERE run_id = ? ORDER BY sequence DESC LIMIT 1",
     [input.runId]
@@ -83,4 +88,11 @@ export function verifyAudit(runId: string): { ok: boolean; failedAt?: number; ro
 
 export function auditDigest(value: unknown): string {
   return digest(canonicalJson(value));
+}
+
+export function simulateNextAuditFailureForTest(type: string): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("Audit failure simulation is only available in test.");
+  }
+  failNextAuditTypeForTest = type;
 }

@@ -76,7 +76,7 @@ export function mintCapability(params: {
   return CapabilitySchema.parse({ ...unsigned, signature });
 }
 
-export function verifyCapability(capability: Capability, call: Pick<ToolCall, "tool" | "action"> & { resource?: string }): {
+export function verifyCapability(capability: Capability, call: Pick<ToolCall, "tool" | "action"> & { resource?: string; scope?: Capability["scope"] }): {
   ok: boolean;
   reason: string;
 } {
@@ -99,6 +99,9 @@ export function verifyCapability(capability: Capability, call: Pick<ToolCall, "t
   }
   if (call.resource && capability.resource !== call.resource) {
     return { ok: false, reason: "Capability does not match requested resource." };
+  }
+  if (call.scope && capability.scope !== call.scope) {
+    return { ok: false, reason: "Capability does not match requested scope." };
   }
   return { ok: true, reason: "Capability valid." };
 }

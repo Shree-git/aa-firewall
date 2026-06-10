@@ -23,9 +23,13 @@ describe("policy and capabilities", () => {
     const step = getFallbackPlan().steps.find((item) => item.kind === "write")!;
     const capability = mintCapability({ runId: "run_test", actor, step, approvalId: "approval_test" });
 
-    expect(verifyCapability(capability, { tool: step.tool, action: step.action, resource: step.resource })).toMatchObject({ ok: true });
+    expect(verifyCapability(capability, { tool: step.tool, action: step.action, resource: step.resource, scope: "write" })).toMatchObject({ ok: true });
     expect(
       verifyCapability({ ...capability, resource: "saas:other" }, { tool: step.tool, action: step.action, resource: step.resource })
     ).toMatchObject({ ok: false });
+    expect(verifyCapability(capability, { tool: step.tool, action: step.action, resource: step.resource, scope: "read" })).toMatchObject({
+      ok: false,
+      reason: "Capability does not match requested scope."
+    });
   });
 });

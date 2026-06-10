@@ -122,11 +122,66 @@ export const ConnectorActivitySchema = z.object({
   stepId: z.string(),
   tool: ToolNameSchema,
   action: ToolActionSchema,
-  status: z.enum(["pending", "success", "failed", "blocked"]),
+  status: z.enum(["pending", "success", "failed", "blocked", "recovered"]),
   message: z.string(),
   createdAt: z.string()
 });
 export type ConnectorActivity = z.infer<typeof ConnectorActivitySchema>;
+
+export const StateDiffSchema = z.object({
+  stepId: z.string().optional(),
+  tool: ToolNameSchema,
+  action: ToolActionSchema,
+  resource: z.string(),
+  message: z.string(),
+  before: z.unknown().optional(),
+  after: z.unknown().optional(),
+  digest: z.string()
+});
+export type StateDiff = z.infer<typeof StateDiffSchema>;
+
+export const InternalSystemNameSchema = z.enum(["internal_db", "rest_tickets", "graphql_directory", "legacy_billing", "security_probe"]);
+export type InternalSystemName = z.infer<typeof InternalSystemNameSchema>;
+
+export const InternalCallFrameSchema = z.object({
+  id: z.string(),
+  runId: z.string().nullable(),
+  system: InternalSystemNameSchema,
+  method: z.string(),
+  path: z.string(),
+  requestRedacted: z.unknown(),
+  responseRedacted: z.unknown(),
+  statusCode: z.number().int(),
+  capabilityId: z.string().nullable(),
+  capabilityStatus: z.enum(["missing", "invalid", "scope_mismatch", "valid", "not_required"]),
+  createdAt: z.string()
+});
+export type InternalCallFrame = z.infer<typeof InternalCallFrameSchema>;
+
+export const CapabilityProbeResultSchema = z.object({
+  id: z.string(),
+  runId: z.string(),
+  label: z.string(),
+  statusCode: z.number().int(),
+  expected: z.number().int(),
+  message: z.string(),
+  passed: z.boolean(),
+  createdAt: z.string()
+});
+export type CapabilityProbeResult = z.infer<typeof CapabilityProbeResultSchema>;
+
+export const InternalSystemSnapshotSchema = z.object({
+  runId: z.string().nullable(),
+  employee: z.record(z.unknown()).nullable(),
+  accessGrants: z.array(z.record(z.unknown())),
+  tickets: z.array(z.record(z.unknown())),
+  directory: z.record(z.unknown()).nullable(),
+  legacyBilling: z.record(z.unknown()).nullable(),
+  lastCalls: z.array(InternalCallFrameSchema),
+  protocolFrames: z.array(InternalCallFrameSchema),
+  capabilityProbeResults: z.array(CapabilityProbeResultSchema)
+});
+export type InternalSystemSnapshot = z.infer<typeof InternalSystemSnapshotSchema>;
 
 export const EvidencePacketSchema = z.object({
   runSummary: z.record(z.unknown()),
@@ -137,7 +192,8 @@ export const EvidencePacketSchema = z.object({
   policyDecisions: z.array(PolicyDecisionSchema),
   capabilities: z.array(CapabilitySchema),
   toolCalls: z.array(ToolCallSchema),
-  stateDiffs: z.array(z.record(z.unknown())),
+  stateDiffs: z.array(StateDiffSchema),
+  auditEvents: z.array(AuditEventSchema),
   auditRootHash: z.string(),
   generatedAt: z.string()
 });
@@ -145,10 +201,19 @@ export type EvidencePacket = z.infer<typeof EvidencePacketSchema>;
 
 export const StartRunInputSchema = z.object({
   prompt: z.string().min(5),
-  actorRole: ActorRoleSchema,
   scenario: z.enum(["happy_path", "rest_failure", "prompt_injection"]).default("happy_path")
 });
 export type StartRunInput = z.infer<typeof StartRunInputSchema>;
+
+export const StartRunRequestSchema = StartRunInputSchema.extend({
+  actorRole: ActorRoleSchema
+});
+export type StartRunRequest = z.infer<typeof StartRunRequestSchema>;
+
+export const ApprovalRequestSchema = z.object({
+  approve: z.boolean().default(true)
+});
+export type ApprovalRequest = z.infer<typeof ApprovalRequestSchema>;
 
 export const DemoSnapshotSchema = z.object({
   runId: z.string().nullable(),
@@ -160,6 +225,10 @@ export const DemoSnapshotSchema = z.object({
   approvals: z.array(ApprovalSchema),
   connectorActivity: z.array(ConnectorActivitySchema),
   auditEvents: z.array(AuditEventSchema),
+  policyDecisions: z.array(PolicyDecisionSchema).default([]),
+  capabilities: z.array(CapabilitySchema).default([]),
+  toolCalls: z.array(ToolCallSchema).default([]),
+  stateDiffs: z.array(StateDiffSchema).default([]),
   finalReport: z.string().nullable(),
   evidence: EvidencePacketSchema.nullable(),
   blockedReason: z.string().nullable()

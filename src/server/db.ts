@@ -143,6 +143,40 @@ function migrate(database: Database.Database): void {
       result_json TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS internal_call_frames (
+      id TEXT PRIMARY KEY,
+      run_id TEXT,
+      system TEXT NOT NULL,
+      method TEXT NOT NULL,
+      path TEXT NOT NULL,
+      request_redacted TEXT NOT NULL,
+      response_redacted TEXT NOT NULL,
+      status_code INTEGER NOT NULL,
+      capability_id TEXT,
+      capability_status TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS capability_probe_results (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      status_code INTEGER NOT NULL,
+      expected INTEGER NOT NULL,
+      message TEXT NOT NULL,
+      passed INTEGER NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_approvals_run_created ON approvals(run_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_capabilities_run ON capabilities(run_id);
+    CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON tool_calls(run_id);
+    CREATE INDEX IF NOT EXISTS idx_connector_activity_run_created ON connector_activity(run_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_events_run_sequence ON audit_events(run_id, sequence);
+    CREATE INDEX IF NOT EXISTS idx_audit_events_run_type_sequence ON audit_events(run_id, type, sequence);
+    CREATE INDEX IF NOT EXISTS idx_internal_call_frames_run_created ON internal_call_frames(run_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_capability_probe_results_run_created ON capability_probe_results(run_id, created_at);
   `);
   seed(database);
 }
@@ -202,4 +236,8 @@ export function get<T = Record<string, unknown>>(sql: string, params: unknown[] 
 
 export function run(sql: string, params: unknown[] = []): Database.RunResult {
   return getDb().prepare(sql).run(...params);
+}
+
+export function transaction<T>(fn: () => T): T {
+  return getDb().transaction(fn)();
 }

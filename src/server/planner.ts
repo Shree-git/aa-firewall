@@ -87,21 +87,62 @@ const fallbackPlan: AgentPlan = AgentPlanSchema.parse({
   ]
 });
 
+const planJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "steps"],
+  properties: {
+    summary: { type: "string" },
+    steps: {
+      type: "array",
+      minItems: 1,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "kind", "tool", "action", "resource", "purpose", "approvalRequired"],
+        properties: {
+          id: { type: "string" },
+          kind: { enum: ["read", "write", "report"] },
+          tool: { enum: ["internal_db", "rest_tickets", "graphql_directory", "legacy_billing", "audit"] },
+          action: {
+            enum: [
+              "read_employee",
+              "read_access",
+              "read_tickets",
+              "read_directory",
+              "transfer_ticket_ownership",
+              "revoke_saas_access",
+              "revoke_database_access",
+              "disable_billing_access",
+              "generate_report"
+            ]
+          },
+          resource: { type: "string" },
+          purpose: { type: "string" },
+          approvalRequired: { type: "boolean" }
+        }
+      }
+    }
+  }
+} as const;
+
 export async function createPlan(prompt: string): Promise<{ plan: AgentPlan; source: "llm" | "fallback"; error?: string }> {
-  if (!process.env.OPENAI_API_KEY) {
+  if (!process.env.OPENROUTER_API_KEY) {
     return { plan: fallbackPlan, source: "fallback" };
   }
 
   try {
-    const response = await fetch("https://api.openai.com/v1/responses", {
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        "HTTP-Referer": process.env.OPENROUTER_SITE_URL ?? "http://localhost:3000",
+        "X-Title": "AA Firewall"
       },
       body: JSON.stringify({
-        model: process.env.OPENAI_MODEL ?? "gpt-5-mini",
-        input: [
+        model: process.env.OPENROUTER_MODEL ?? "minimax/minimax-m3",
+        messages: [
           {
             role: "system",
             content:
@@ -109,55 +150,23 @@ export async function createPlan(prompt: string): Promise<{ plan: AgentPlan; sou
           },
           { role: "user", content: prompt }
         ],
-        text: {
-          format: {
-            type: "json_schema",
+        response_format: {
+          type: "json_schema",
+          json_schema: {
             name: "aa_firewall_plan",
             strict: true,
-            schema: {
-              type: "object",
-              additionalProperties: false,
-              required: ["summary", "steps"],
-              properties: {
-                summary: { type: "string" },
-                steps: {
-                  type: "array",
-                  minItems: 1,
-                  items: {
-                    type: "object",
-                    additionalProperties: false,
-                    required: ["id", "kind", "tool", "action", "resource", "purpose", "approvalRequired"],
-                    properties: {
-                      id: { type: "string" },
-                      kind: { enum: ["read", "write", "report"] },
-                      tool: { enum: ["internal_db", "rest_tickets", "graphql_directory", "legacy_billing", "audit"] },
-                      action: {
-                        enum: [
-                          "read_employee",
-                          "read_access",
-                          "read_tickets",
-                          "read_directory",
-                          "transfer_ticket_ownership",
-                          "revoke_saas_access",
-                          "revoke_database_access",
-                          "disable_billing_access",
-                          "generate_report"
-                        ]
-                      },
-                      resource: { type: "string" },
-                      purpose: { type: "string" },
-                      approvalRequired: { type: "boolean" }
-                    }
-                  }
-                }
-              }
-            }
+            schema: planJsonSchema
           }
-        }
+        },
+        stream: false
       })
     });
-    const json = (await response.json()) as { output_text?: string };
-    const parsed = AgentPlanSchema.safeParse(JSON.parse(json.output_text ?? "{}"));
+    if (!response.ok) {
+      return { plan: fallbackPlan, source: "fallback", error: `OpenRouter returned ${response.status}.` };
+    }
+    const json = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const content = json.choices?.[0]?.message?.content;
+    const parsed = AgentPlanSchema.safeParse(JSON.parse(content ?? "{}"));
     if (!parsed.success) {
       return { plan: fallbackPlan, source: "fallback", error: "Model output failed schema validation." };
     }

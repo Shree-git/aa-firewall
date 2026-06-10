@@ -2,44 +2,40 @@
 
 ## Architecture
 
-AA Firewall is a Next.js TypeScript modular monolith. The model can propose a typed plan, but authority lives in deterministic server code: policy evaluator, broker, signed capabilities, approval gates, connectors, and audit.
+AA Firewall is a Next.js TypeScript modular monolith. The planner can call OpenRouter for structured JSON, but authority stays in deterministic server code: signed session verification, policy evaluation, capability signing, batch approval, connector execution, transaction handling, and audit export.
 
-```
-Browser UI
-  | prompt / approve / retry / export
-  v
-Next.js API Routes
-  | startRun / approveStep / retryStep / exportEvidence
-  v
-Workflow Runner ---> Planner
-  |                live LLM if configured, deterministic fallback otherwise
-  v
-Tool Broker ---> Policy Evaluator ---> Capability Signer
-  |                    |                    |
-  |                    v                    v
-  |                 Audit Store <------ signed read/write capabilities
-  v
-Connectors: internal DB | REST tickets | GraphQL directory | legacy billing mock
-  |
-  v
-SQLite demo state + append-only chain-hashed audit events
+```mermaid
+flowchart TD
+  Browser["Browser UI"] --> Routes["Next.js API Routes"]
+  Routes --> Session["Signed Demo Session"]
+  Routes --> Workflow["Workflow Runner"]
+  Workflow --> Planner["OpenRouter Planner or Fallback"]
+  Workflow --> Policy["Policy Evaluator"]
+  Policy --> Capability["Capability Signer"]
+  Capability --> Broker["Tool Broker"]
+  Broker --> Protocol["Capability-Gated Local Protocol Routes"]
+  Protocol --> Connectors["DB / REST / GraphQL / Legacy Connectors"]
+  Connectors --> Txn["SQLite Transaction"]
+  Txn --> State["Seeded Internal State"]
+  Txn --> Audit["Chain-Hashed Audit"]
+  Audit --> Evidence["Evidence Export"]
+  State --> Live["Live Systems Snapshot"]
 ```
 
-Runtime choices: SQLite for state/audit, JSON only for seed fixtures, central Zod schemas, live LLM planner with deterministic fallback, TypeScript policy evaluator, and HMAC-signed short-lived capabilities.
+Runtime choices: SQLite for state and audit, `better-sqlite3` transactions for connector writes, Zod for shared contracts, HMAC for session/capability signatures, OpenRouter chat completions for the live planner, and a deterministic fallback plan for reviewer reliability.
 
 ## Core Flow
 
-```
-Prompt -> validate actor/session -> create run -> typed plan
-  -> broker evaluates reads -> connectors fetch state
-  -> approval requested for writes -> broker mints write capabilities
-  -> connectors execute with idempotency keys -> audit records all events
-  -> replay/export evidence packet
+```text
+Prompt -> signed session -> create run -> typed plan
+  -> policy-gated reads -> scoped read capabilities -> connector reads
+  -> batch approval -> scoped write capabilities -> connector writes
+  -> transactional audit/idempotency -> evidence export
 ```
 
 State machine:
 
-```
+```text
 created -> planning -> awaiting_approval -> executing -> completed
               |              |                |
               v              v                v
@@ -49,44 +45,74 @@ created -> planning -> awaiting_approval -> executing -> completed
                                            retrying -> executing
 ```
 
-## Security Model
+## Auth and Security Model
 
+- Start-run is the simulated SSO entry point and mints a signed HTTP-only demo session.
+- Protected routes derive actor identity from the server-owned session cookie, not request JSON.
+- Roles: `it_admin`, `manager`, `employee`, `security_auditor`.
 - Deny by default.
-- Simulated roles: `it_admin`, `manager`, `employee`, `security_auditor`.
-- Model output and connector output are untrusted until validated and authorized.
-- Read capabilities mint after policy approval; write capabilities mint only after human approval.
-- Broker rejects expired, malformed, wrong-scope, wrong-resource, or tampered capabilities.
-- Audit write failure blocks further execution.
+- Model output and connector output are untrusted data.
+- Capabilities are HMAC-signed, short-lived, and bound to run, tool, action, resource, actor, scope, and optional approval id.
+- Broker rejects malformed, expired, tampered, wrong-tool, wrong-action, wrong-resource, and wrong-scope capabilities and audits `capability_invalid`.
 
-## Data Contracts
+## Connector and Audit Design
 
-Core shared schemas: `Capability`, `AuditEvent`, `ToolCall`, `EvidencePacket`, `AgentPlan`, `Approval`, and `ConnectorActivity`. These live in `src/server/schemas.ts` and are used by runtime code and tests.
+The connector layer calls protocol-faithful local stand-ins instead of mutating dashboard-only state:
 
-Audit hash input is canonical JSON of event fields excluding `hash`, prefixed by `prevHash`. Every retry creates a new audit event referencing the same idempotency key.
+- `GET /api/internal/db/employee/:id`
+- `GET /api/internal/db/access?employeeId=emp_alex`
+- `GET /api/internal/rest/tickets?owner=emp_alex`
+- `POST /api/internal/rest/tickets/transfer`
+- `POST /api/internal/graphql/directory`
+- `GET /api/internal/legacy/billing/:employeeId`
+- `POST /api/internal/legacy/billing/disable`
+- `GET /api/internal/systems/snapshot`
+- `POST /api/internal/capability/probe`
 
-## Failure Modes and Tests
+Internal endpoints require `Authorization: Bearer <capability-id>`. The server loads the signed capability from SQLite, verifies HMAC/signature/expiry, and checks tool/action/resource/scope against the requested operation. Missing token returns `401`; wrong scope/tool/resource returns `403`.
 
-| Codepath | Failure mode | Handling | Test |
+GraphQL directory uses the `graphql` package with a small real schema. Legacy billing formats and parses a fixed-width record while redacting the billing account code in snapshots and protocol frames.
+
+Each connector operation uses a stable idempotency key. Mutations, idempotency records, connector activity, and `tool_result` audit events are written inside one SQLite transaction. If audit append fails, the connector mutation rolls back. If REST ticketing times out after applying a transfer, the mutation and audit are committed, the run pauses, and retry reuses the existing idempotency key without a duplicate write.
+
+Audit events are hash chained per run. Evidence export includes full audit replay, approval records, policy decisions, capabilities, tool calls, audit root hash, and compact redacted before/after diffs for ticket ownership, access grants, and legacy billing.
+
+SQLite indexes support run-scoped reads for approvals, capabilities, tool calls, connector activity, and audit events.
+
+## Planner
+
+Live planner path:
+
+- Endpoint: `https://openrouter.ai/api/v1/chat/completions`
+- Default model: `minimax/minimax-m3`
+- Env vars: `OPENROUTER_API_KEY`, optional `OPENROUTER_MODEL`
+- Structured output: `response_format: { type: "json_schema", json_schema: ... }`
+
+If the key is missing, the model returns malformed JSON, or schema validation fails, the workflow uses the deterministic fallback plan.
+
+## Critical Tests
+
+| Codepath | Failure mode | Handling | Coverage |
 |---|---|---|---|
-| Planner | malformed LLM JSON | fallback or plan error; no tools execute | Vitest |
-| Policy | unauthorized role | deny before capability mint; audit denial | Vitest |
-| Approval | user denies write | run becomes `denied`; no write capability | Vitest + Playwright |
-| Capability | expired/tampered token | broker rejects; audit `capability_invalid` | Vitest |
-| Connector | REST timeout after DB write | pause, record failure, retry same idempotency key | Vitest + Playwright |
-| Audit | hash-chain mismatch | replay/export marks integrity failure | Vitest |
-| Prompt injection | malicious ticket text | displayed as data; no unauthorized tool call | Vitest |
-| UI | double approval click | one approval row, one write capability | Playwright |
+| Session | missing/tampered/expired | reject protected operation | `tests/session.test.ts` |
+| API routes | bad JSON, unknown run, unauthorized actor, invalid approval | structured JSON errors | `tests/api.test.ts` |
+| Capability | tool/action/resource/scope mismatch | reject before connector | `tests/security.test.ts` |
+| Protocol routes | missing token, wrong scope, valid read/write | 401/403/200 with no authority drift | `tests/internal-systems.test.ts` |
+| GraphQL/legacy | invalid query, fixed-width billing state | reject bad query, redact legacy account | `tests/internal-systems.test.ts` |
+| Live snapshot | reset/read/approved states | show real backend state and protocol frames | `tests/internal-systems.test.ts`, `e2e/demo.spec.ts` |
+| Connector/audit | audit append failure | rollback mutation and idempotency | `tests/workflow.test.ts` |
+| Evidence | missing audit replay/diffs | export typed packet | `tests/workflow.test.ts` |
+| Approval | duplicate batch submit | no duplicate operations | `tests/workflow.test.ts` |
+| Retry | REST timeout after write | recover with idempotency key | `tests/workflow.test.ts`, `e2e/demo.spec.ts` |
+| Planner | mocked success, malformed JSON, schema failure, fallback | stable plan source | `tests/planner.test.ts` |
+| Demo UI | happy path, blocked role, retry, prompt injection, mobile, nav | reviewer workflow proof | `e2e/demo.spec.ts` |
 
-## Implementation Order
+## Verification
 
-1. Scaffold Next.js, Vitest, Playwright, Zod, SQLite.
-2. Implement shared schemas.
-3. Implement policy evaluator, broker, capabilities, approvals.
-4. Implement workflow and connector mocks.
-5. Implement chain-hashed audit and evidence export.
-6. Implement dashboard UI and E2E coverage.
-7. Record demo video and submission notes.
+`npm run verify` chains:
 
-## Not in Scope
+```text
+npm run lint -> npm test -> npm run build -> npm run test:e2e
+```
 
-Real OIDC/LDAP, OPA/Cedar, production connectors, Dockerized microservices, Temporal, connector marketplace, HA, secrets rotation, and compliance certification are deferred.
+`lint` currently aliases `typecheck` because `next lint` is no longer available in the installed Next.js version.

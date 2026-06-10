@@ -2,16 +2,21 @@ import { appendAudit, auditDigest, listAudit } from "./audit";
 import { executeConnector, listActivity, recordActivity } from "./connectors";
 import { all, get, getDb, run } from "./db";
 import { exportEvidence } from "./evidence";
+import { HttpError } from "./http";
 import { newId, nowIso } from "./id";
 import { createPlan } from "./planner";
-import { evaluatePolicy, makeAuditActor, mintCapability, verifyCapability } from "./security";
+import { evaluatePolicy, mintCapability, verifyCapability } from "./security";
 import {
+  Actor,
   AgentPlan,
   Approval,
   ApprovalSchema,
+  CapabilitySchema,
   DemoSnapshot,
   DemoSnapshotSchema,
   PlanStep,
+  PolicyDecisionSchema,
+  StateDiffSchema,
   StartRunInput,
   StartRunInputSchema,
   ToolCall,
@@ -21,9 +26,8 @@ import {
 export const DEFAULT_PROMPT =
   "Offboard Alex Chen effective today: find all systems Alex has access to, check open customer escalations, transfer ownership to Priya Shah, revoke SaaS and database access, disable legacy billing access, and produce an audit report.";
 
-export async function startRun(input: StartRunInput): Promise<DemoSnapshot> {
+export async function startRun(input: StartRunInput, actor: Actor): Promise<DemoSnapshot> {
   const parsed = StartRunInputSchema.parse(input);
-  const actor = makeAuditActor(parsed.actorRole);
   const runId = newId("run");
   const createdAt = nowIso();
   run(
@@ -67,9 +71,16 @@ export async function startRun(input: StartRunInput): Promise<DemoSnapshot> {
   return getSnapshot(runId);
 }
 
-export function approveRun(runId: string, approve = true): DemoSnapshot {
+export function approveRun(runId: string, actor: Actor, approve = true): DemoSnapshot {
   const runRow = requireRun(runId);
-  const actor = makeAuditActor(runRow.actor_role as never);
+  assertRunActor(runRow, actor);
+  if (runRow.state === "completed" || runRow.state === "denied" || runRow.state === "blocked") {
+    return getSnapshot(runId);
+  }
+  const pending = get<{ count: number }>("SELECT COUNT(*) as count FROM approvals WHERE run_id = ? AND status = 'pending'", [runId])?.count ?? 0;
+  if (pending === 0) {
+    throw new HttpError(409, "APPROVAL_NOT_PENDING", "Run does not have a pending approval batch.");
+  }
   const status = approve ? "approved" : "denied";
   run("UPDATE approvals SET status = ?, decided_at = ? WHERE run_id = ? AND status = 'pending'", [status, nowIso(), runId]);
   appendAudit({
@@ -77,18 +88,19 @@ export function approveRun(runId: string, approve = true): DemoSnapshot {
     type: approve ? "approval_granted" : "approval_denied",
     actorId: actor.id,
     decision: approve ? "allow" : "deny",
-    payloadRedacted: { status }
+    payloadRedacted: { status, count: pending, mode: "batch" }
   });
   if (!approve) {
     updateState(runId, "denied");
     return getSnapshot(runId);
   }
-  executeWritePhase(runId);
+  executeWritePhase(runId, actor);
   return getSnapshot(runId);
 }
 
-export function retryRun(runId: string): DemoSnapshot {
+export function retryRun(runId: string, actor: Actor): DemoSnapshot {
   const runRow = requireRun(runId);
+  assertRunActor(runRow, actor);
   if (runRow.state !== "paused") {
     return getSnapshot(runId);
   }
@@ -99,7 +111,7 @@ export function retryRun(runId: string): DemoSnapshot {
     actorId: String(runRow.actor_id),
     payloadRedacted: { note: "Retrying paused step with original idempotency keys." }
   });
-  executeWritePhase(runId, true);
+  executeWritePhase(runId, actor, true);
   return getSnapshot(runId);
 }
 
@@ -112,6 +124,8 @@ export function resetDemo(): DemoSnapshot {
     DELETE FROM connector_activity;
     DELETE FROM audit_events;
     DELETE FROM operations;
+    DELETE FROM internal_call_frames;
+    DELETE FROM capability_probe_results;
     UPDATE employees SET status = 'active' WHERE id = 'emp_alex';
     UPDATE access_grants SET status = 'active' WHERE employee_id = 'emp_alex';
     UPDATE tickets SET owner_id = 'emp_alex' WHERE id IN ('ticket_1942', 'ticket_2047');
@@ -120,8 +134,8 @@ export function resetDemo(): DemoSnapshot {
   return emptySnapshot();
 }
 
-async function executeReadPhase(runId: string, actor: ReturnType<typeof makeAuditActor>, plan: AgentPlan): Promise<boolean> {
-  for (const step of plan.steps.filter((item) => item.kind !== "write")) {
+async function executeReadPhase(runId: string, actor: Actor, plan: AgentPlan): Promise<boolean> {
+  for (const step of plan.steps.filter((item) => item.kind === "read")) {
     const decision = evaluatePolicy(actor, step);
     appendAudit({
       runId,
@@ -140,15 +154,14 @@ async function executeReadPhase(runId: string, actor: ReturnType<typeof makeAudi
     }
     const capability = mintCapability({ runId, actor, step });
     persistCapability(runId, capability);
-    if (step.kind === "report") continue;
     executeStep(runId, actor.id, step, capability);
   }
   return false;
 }
 
-function executeWritePhase(runId: string, retry = false): void {
+function executeWritePhase(runId: string, actor: Actor, retry = false): void {
   const runRow = requireRun(runId);
-  const actor = makeAuditActor(runRow.actor_role as never);
+  assertRunActor(runRow, actor);
   const plan = JSON.parse(String(runRow.plan_json)) as AgentPlan;
   updateState(runId, "executing");
   for (const step of plan.steps.filter((item) => item.kind === "write")) {
@@ -188,6 +201,7 @@ function executeWritePhase(runId: string, retry = false): void {
       return;
     }
   }
+  if (!executeReportPhase(runId, actor, plan)) return;
   const finalReport =
     "Alex Chen offboarding completed. Tickets transferred to Priya Shah, SaaS/database grants revoked, legacy billing disabled, and evidence packet verified.";
   run("UPDATE runs SET final_report = ?, state = 'completed', updated_at = ? WHERE id = ?", [finalReport, nowIso(), runId]);
@@ -199,17 +213,55 @@ function executeWritePhase(runId: string, retry = false): void {
   });
 }
 
+function executeReportPhase(runId: string, actor: Actor, plan: AgentPlan): boolean {
+  const step = plan.steps.find((item) => item.kind === "report");
+  if (!step) return true;
+  const completed = get<{ count: number }>("SELECT COUNT(*) as count FROM operations WHERE idempotency_key = ?", [idempotencyKey(runId, step)]);
+  if (completed?.count) return true;
+
+  const decision = evaluatePolicy(actor, step);
+  appendAudit({
+    runId,
+    type: "policy_decision",
+    actorId: actor.id,
+    tool: step.tool,
+    action: step.action,
+    resource: step.resource,
+    decision: decision.allowed ? "allow" : "deny",
+    payloadRedacted: decision
+  });
+  if (!decision.allowed) {
+    updateState(runId, "blocked", decision.reason);
+    recordActivity({ runId, tool: step.tool, action: step.action, id: step.id }, "blocked", decision.reason);
+    return false;
+  }
+  const capability = mintCapability({ runId, actor, step });
+  persistCapability(runId, capability);
+  try {
+    executeStep(runId, actor.id, step, capability);
+    return true;
+  } catch {
+    updateState(runId, "paused", "Report generation failed after connector execution.");
+    return false;
+  }
+}
+
 function executeStep(runId: string, actorId: string, step: PlanStep, capability: ReturnType<typeof mintCapability>): void {
   const call = ToolCallSchema.parse({
     runId,
     tool: step.tool,
     action: step.action,
-    input: { employeeId: "emp_alex", transferOwnerId: "emp_priya" },
+    input: buildConnectorInput(step),
     capability,
     idempotencyKey: idempotencyKey(runId, step),
     purpose: step.purpose
   });
-  const verified = verifyCapability(capability, { tool: call.tool, action: call.action, resource: capability.resource });
+  const verified = verifyCapability(capability, {
+    tool: call.tool,
+    action: call.action,
+    resource: step.resource,
+    scope: step.kind === "write" ? "write" : "read"
+  });
   if (!verified.ok) {
     appendAudit({
       runId,
@@ -322,6 +374,20 @@ export function getSnapshot(runId?: string): DemoSnapshot {
         decidedAt: approval.decided_at ?? undefined
       })
   );
+  const policyDecisions = all<Record<string, unknown>>(
+    "SELECT payload_redacted FROM audit_events WHERE run_id = ? AND type = 'policy_decision' ORDER BY sequence ASC",
+    [runId]
+  ).map((decision) => PolicyDecisionSchema.parse(JSON.parse(String(decision.payload_redacted))));
+  const capabilities = all<Record<string, unknown>>("SELECT payload_json FROM capabilities WHERE run_id = ? ORDER BY id ASC", [runId]).map((capability) =>
+    CapabilitySchema.parse(JSON.parse(String(capability.payload_json)))
+  );
+  const toolCalls = all<Record<string, unknown>>("SELECT payload_json FROM tool_calls WHERE run_id = ? ORDER BY id ASC", [runId]).map((toolCall) =>
+    ToolCallSchema.parse(JSON.parse(String(toolCall.payload_json)))
+  );
+  const stateDiffs = all<Record<string, unknown>>(
+    "SELECT payload_redacted FROM audit_events WHERE run_id = ? AND type = 'tool_result' ORDER BY sequence ASC",
+    [runId]
+  ).map((diff) => StateDiffSchema.parse(JSON.parse(String(diff.payload_redacted))));
   const evidence = row.state === "completed" || row.state === "paused" || row.state === "blocked" || row.state === "denied" ? exportEvidence(runId) : null;
   return DemoSnapshotSchema.parse({
     runId,
@@ -333,6 +399,10 @@ export function getSnapshot(runId?: string): DemoSnapshot {
     approvals,
     connectorActivity: listActivity(runId),
     auditEvents: listAudit(runId),
+    policyDecisions,
+    capabilities,
+    toolCalls,
+    stateDiffs,
     finalReport: row.final_report,
     evidence,
     blockedReason: row.blocked_reason
@@ -350,8 +420,35 @@ function emptySnapshot(): DemoSnapshot {
     approvals: [],
     connectorActivity: [],
     auditEvents: [],
+    policyDecisions: [],
+    capabilities: [],
+    toolCalls: [],
+    stateDiffs: [],
     finalReport: null,
     evidence: null,
     blockedReason: null
   });
+}
+
+function assertRunActor(runRow: Record<string, unknown>, actor: Actor): void {
+  if (String(runRow.actor_id) !== actor.id) {
+    throw new HttpError(403, "ACTOR_FORBIDDEN", "Signed demo session actor is not authorized for this run.");
+  }
+}
+
+function buildConnectorInput(step: PlanStep): Record<string, unknown> {
+  const employeeId = employeeIdFromResource(step.resource);
+  const input: Record<string, unknown> = { employeeId };
+  if (step.action === "transfer_ticket_ownership") {
+    input.transferOwnerId = "emp_priya";
+  }
+  return input;
+}
+
+function employeeIdFromResource(resource: string): string {
+  const employeeId = resource.split(":").find((part) => part.startsWith("emp_"));
+  if (!employeeId?.startsWith("emp_")) {
+    throw new Error(`Unsupported connector resource ${resource}`);
+  }
+  return employeeId;
 }
