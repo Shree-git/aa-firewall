@@ -4,6 +4,8 @@ coverage/
 test-results/
 playwright-report/
 .playwright-mcp/
+.DS_Store
+*.docx
 *.log
 data/*.db
 data/*.db-shm
