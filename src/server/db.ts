@@ -1,8 +1,9 @@
 import Database from "better-sqlite3";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
-const dataDir = path.join(process.cwd(), "data");
+const dataDir = process.env.VERCEL ? path.join(os.tmpdir(), "aa-firewall") : path.join(process.cwd(), "data");
 const dbPath = path.join(dataDir, "aa-firewall.db");
 
 let db: Database.Database | null = null;

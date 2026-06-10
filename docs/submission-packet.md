@@ -4,10 +4,10 @@ Demo video (2-5 min, core workflow):
 TBD
 
 PRD:
-`docs/PRD.md`
+`docs/PRD.md` and `docs/AA-Firewall-PRD.docx`
 
 TDD:
-`docs/TDD.md`
+`docs/TDD.md` and `docs/AA-Firewall-TDD.docx`
 
 Prototype:
 Local: `npm install && npm run dev`, then open `http://localhost:3000`

@@ -126,17 +126,24 @@ const planJsonSchema = {
   }
 } as const;
 
+const plannerTimeoutMs = Number(process.env.PLANNER_TIMEOUT_MS ?? 5000);
+
 export async function createPlan(prompt: string): Promise<{ plan: AgentPlan; source: "llm" | "fallback"; error?: string }> {
-  if (!process.env.OPENROUTER_API_KEY) {
+  const openRouterApiKey = process.env.OPENROUTER_API_KEY;
+  if (!openRouterApiKey || openRouterApiKey === "disabled" || openRouterApiKey.startsWith("replace-with")) {
     return { plan: fallbackPlan, source: "fallback" };
   }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), plannerTimeoutMs);
 
   try {
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
+      signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        Authorization: `Bearer ${openRouterApiKey}`,
         "HTTP-Referer": process.env.OPENROUTER_SITE_URL ?? "http://localhost:3000",
         "X-Title": "AA Firewall"
       },
@@ -175,8 +182,10 @@ export async function createPlan(prompt: string): Promise<{ plan: AgentPlan; sou
     return {
       plan: fallbackPlan,
       source: "fallback",
-      error: error instanceof Error ? error.message : "Unknown planner error."
+      error: error instanceof Error && error.name === "AbortError" ? `Planner timed out after ${plannerTimeoutMs}ms.` : error instanceof Error ? error.message : "Unknown planner error."
     };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

@@ -1,118 +1,125 @@
 # TDD: AA Firewall
 
-## Architecture
+## Architecture Summary
 
-AA Firewall is a Next.js TypeScript modular monolith. The planner can call OpenRouter for structured JSON, but authority stays in deterministic server code: signed session verification, policy evaluation, capability signing, batch approval, connector execution, transaction handling, and audit export.
+AA Firewall is a Next.js TypeScript prototype for secure agent execution behind a corporate firewall. The UI demonstrates the workflow, but authority is enforced server-side: signed session identity, RBAC, policy evaluation, capability signing, connector execution, approval, idempotency, audit durability, and evidence export all live in deterministic code.
+
+The planner can call OpenRouter for structured JSON using `minimax/minimax-m3`, but model output is only a proposal. If the API key is absent, the response is malformed, or schema validation fails, the workflow uses a deterministic fallback plan so reviewers can always run the prototype.
 
 ```mermaid
 flowchart TD
-  Browser["Browser UI"] --> Routes["Next.js API Routes"]
-  Routes --> Session["Signed Demo Session"]
-  Routes --> Workflow["Workflow Runner"]
-  Workflow --> Planner["OpenRouter Planner or Fallback"]
-  Workflow --> Policy["Policy Evaluator"]
-  Policy --> Capability["Capability Signer"]
-  Capability --> Broker["Tool Broker"]
-  Broker --> Protocol["Capability-Gated Local Protocol Routes"]
-  Protocol --> Connectors["DB / REST / GraphQL / Legacy Connectors"]
-  Connectors --> Txn["SQLite Transaction"]
-  Txn --> State["Seeded Internal State"]
-  Txn --> Audit["Chain-Hashed Audit"]
-  Audit --> Evidence["Evidence Export"]
-  State --> Live["Live Systems Snapshot"]
+  UI["Browser UI"] --> API["Next.js API routes"]
+  API --> Session["Signed demo session / RBAC"]
+  API --> Workflow["Workflow runner"]
+  Workflow --> Planner["OpenRouter planner or fallback plan"]
+  Workflow --> Policy["Policy evaluator"]
+  Policy --> Caps["HMAC scoped capabilities"]
+  Caps --> Broker["Tool broker"]
+  Broker --> Protocol["Capability-gated internal routes"]
+  Protocol --> Systems["SQLite DB / REST / GraphQL / Legacy"]
+  Systems --> Txn["SQLite transaction boundary"]
+  Txn --> Audit["Chain-hashed audit + state diffs"]
+  Audit --> Evidence["Reviewer evidence packet"]
+  Systems --> Live["Live Systems snapshot"]
 ```
 
-Runtime choices: SQLite for state and audit, `better-sqlite3` transactions for connector writes, Zod for shared contracts, HMAC for session/capability signatures, OpenRouter chat completions for the live planner, and a deterministic fallback plan for reviewer reliability.
+The local systems are protocol-faithful stand-ins for firewall-constrained enterprise systems. They are intentionally small, but they force the production integration shape: private endpoints, bearer capability IDs, resource-scoped checks, redacted request/response capture, and audit replay.
 
-## Core Flow
+## Execution and Data Flow
 
 ```text
-Prompt -> signed session -> create run -> typed plan
-  -> policy-gated reads -> scoped read capabilities -> connector reads
-  -> batch approval -> scoped write capabilities -> connector writes
-  -> transactional audit/idempotency -> evidence export
+Prompt -> signed session -> typed plan -> policy-gated reads
+  -> read capabilities -> connector reads -> batch approval
+  -> write capabilities -> connector writes -> audit/evidence export
 ```
 
-State machine:
+The run state machine is `created -> planning -> awaiting_approval -> executing -> completed`, with `blocked`, `denied`, `paused`, and `retrying` branches. Read steps execute after policy approval. Write steps are collected behind one batch approval gate. After approval, write-scoped capabilities are minted and the broker executes the connector actions.
 
-```text
-created -> planning -> awaiting_approval -> executing -> completed
-              |              |                |
-              v              v                v
-            blocked        denied          paused
-                                             |
-                                             v
-                                           retrying -> executing
-```
+Core records are stored in SQLite:
+
+- `runs`, `approvals`, `capabilities`, `tool_calls`, `operations`, and `connector_activity` track orchestration.
+- `audit_events` stores the hash-chained audit trail.
+- `internal_call_frames` stores protocol-level method/path/status/payload evidence.
+- Seed tables model the enterprise systems: `employees`, `access_grants`, `tickets`, `directory_edges`, and `legacy_billing`.
+
+The UI reads both the workflow snapshot and the `Live Systems` snapshot. This separation is deliberate: the dashboard does not invent success state. It shows current backend rows plus captured protocol frames.
 
 ## Auth and Security Model
 
-- Start-run is the simulated SSO entry point and mints a signed HTTP-only demo session.
-- Protected routes derive actor identity from the server-owned session cookie, not request JSON.
-- Roles: `it_admin`, `manager`, `employee`, `security_auditor`.
-- Deny by default.
-- Model output and connector output are untrusted data.
-- Capabilities are HMAC-signed, short-lived, and bound to run, tool, action, resource, actor, scope, and optional approval id.
-- Broker rejects malformed, expired, tampered, wrong-tool, wrong-action, wrong-resource, and wrong-scope capabilities and audits `capability_invalid`.
+The start-run route simulates enterprise SSO by minting a signed HTTP-only demo session for one role: `it_admin`, `manager`, `employee`, or `security_auditor`. Protected workflow routes derive actor identity from that server-owned session cookie, not request JSON. This closes the main demo security gap: a client cannot make itself an admin by posting a different role.
 
-## Connector and Audit Design
+Every connector call requires an HMAC-signed capability. A capability is short-lived and bound to:
 
-The connector layer calls protocol-faithful local stand-ins instead of mutating dashboard-only state:
+- run id and actor id
+- tool and action
+- resource string, such as `tickets:emp_alex`
+- scope, `read` or `write`
+- expiry timestamp
+- optional approval id for destructive writes
+
+The broker and internal routes verify schema, signature, expiry, tool, action, resource, and scope before execution. Mismatches are rejected and auditable. The `Security Probe` makes the boundary visible: missing token returns `401`, wrong-scope token returns `403`, and valid write capability returns `200`.
+
+Model output, retrieved ticket content, and connector responses are untrusted data. The prompt-injection fixture includes hostile ticket text, but the system treats it as ticket body content and does not mint unrelated CEO capabilities or tool calls.
+
+## Connector Strategy
+
+The prototype covers connector breadth with four protocol styles:
+
+| System | Interface | Demonstrated operation |
+|---|---|---|
+| Internal DB | SQLite-backed API | Read employee/access; revoke SaaS and database grants |
+| REST Ticketing | REST routes | Read open tickets; transfer ownership to Priya |
+| GraphQL Directory | `graphql` schema execution | Resolve Alex -> Priya manager relationship |
+| Legacy Billing | Fixed-width adapter | Parse and disable a redacted billing record |
+
+Representative internal endpoints:
 
 - `GET /api/internal/db/employee/:id`
 - `GET /api/internal/db/access?employeeId=emp_alex`
 - `GET /api/internal/rest/tickets?owner=emp_alex`
 - `POST /api/internal/rest/tickets/transfer`
 - `POST /api/internal/graphql/directory`
-- `GET /api/internal/legacy/billing/:employeeId`
 - `POST /api/internal/legacy/billing/disable`
 - `GET /api/internal/systems/snapshot`
 - `POST /api/internal/capability/probe`
 
-Internal endpoints require `Authorization: Bearer <capability-id>`. The server loads the signed capability from SQLite, verifies HMAC/signature/expiry, and checks tool/action/resource/scope against the requested operation. Missing token returns `401`; wrong scope/tool/resource returns `403`.
+Internal routes require `Authorization: Bearer <capability-id>`. The server loads the signed capability from SQLite and validates it against the exact requested operation. The same service layer powers connector execution and direct protocol-route tests, so demo-visible protocol behavior is not a separate mock.
 
-GraphQL directory uses the `graphql` package with a small real schema. Legacy billing formats and parses a fixed-width record while redacting the billing account code in snapshots and protocol frames.
+## Audit, Evidence, and Durability
 
-Each connector operation uses a stable idempotency key. Mutations, idempotency records, connector activity, and `tool_result` audit events are written inside one SQLite transaction. If audit append fails, the connector mutation rolls back. If REST ticketing times out after applying a transfer, the mutation and audit are committed, the run pauses, and retry reuses the existing idempotency key without a duplicate write.
+Connector mutation, idempotency record, connector activity, and `tool_result` audit append run inside one SQLite transaction. If audit append fails, mutation and idempotency roll back together. This prevents the dangerous state where a write succeeds but no durable audit exists.
 
-Audit events are hash chained per run. Evidence export includes full audit replay, approval records, policy decisions, capabilities, tool calls, audit root hash, and compact redacted before/after diffs for ticket ownership, access grants, and legacy billing.
+Idempotency keys are stable per run and step. The REST timeout scenario intentionally pauses after a committed ticket transfer; retry reuses the existing idempotency key, records recovery, and avoids duplicate transfer writes.
 
-SQLite indexes support run-scoped reads for approvals, capabilities, tool calls, connector activity, and audit events.
+Audit events are hash-chained per run with sequence numbers and previous-hash linkage. Evidence export includes the prompt, actor, typed plan, approvals, policy decisions, capabilities, tool calls, full audit replay, audit root hash, and redacted before/after diffs for tickets, access grants, and legacy billing. Protocol frames also redact email, ticket body, and billing account code.
 
-## Planner
+SQLite indexes support run-scoped reads for approvals, capabilities, tool calls, connector activity, audit events, and protocol frames.
 
-Live planner path:
+## Failure Modes and Handling
 
-- Endpoint: `https://openrouter.ai/api/v1/chat/completions`
-- Default model: `minimax/minimax-m3`
-- Env vars: `OPENROUTER_API_KEY`, optional `OPENROUTER_MODEL`
-- Structured output: `response_format: { type: "json_schema", json_schema: ... }`
+| Failure mode | Handling |
+|---|---|
+| Missing/tampered/expired session | Protected workflow route returns structured `401` |
+| Unauthorized actor | Run blocks before destructive capabilities mint |
+| Capability mismatch | Internal route returns `403`; broker audits invalid capability |
+| Bad planner output | Deterministic fallback plan is used |
+| Audit append failure | Connector mutation and operation record roll back |
+| REST timeout after write | Run pauses; retry recovers with idempotency key |
+| Invalid GraphQL query | Directory endpoint returns failure without mutation |
+| Prompt-injection ticket text | Treated as data; no authority granted |
 
-If the key is missing, the model returns malformed JSON, or schema validation fails, the workflow uses the deterministic fallback plan.
+## Verification Matrix
 
-## Critical Tests
+| Claim | Verification |
+|---|---|
+| Session auth is server-owned | `tests/session.test.ts`, route tests for missing/tampered actors |
+| API errors are structured | `tests/api.test.ts` |
+| Capability mismatch is denied | `tests/security.test.ts`, `tests/internal-systems.test.ts` |
+| Internal endpoints are gated | Probe and route tests for `401`, `403`, `200` |
+| GraphQL and legacy adapters are real | GraphQL invalid-query test; fixed-width billing snapshot test |
+| Audit and mutation are atomic | Rollback test when audit append fails |
+| Retry is idempotent | REST timeout E2E and operation-count assertions |
+| UI proves real state mutation | Playwright happy path: Live Systems, Security Probe, protocol inspector |
+| Planner is reliable for reviewers | OpenRouter mocked success/failure plus deterministic fallback |
 
-| Codepath | Failure mode | Handling | Coverage |
-|---|---|---|---|
-| Session | missing/tampered/expired | reject protected operation | `tests/session.test.ts` |
-| API routes | bad JSON, unknown run, unauthorized actor, invalid approval | structured JSON errors | `tests/api.test.ts` |
-| Capability | tool/action/resource/scope mismatch | reject before connector | `tests/security.test.ts` |
-| Protocol routes | missing token, wrong scope, valid read/write | 401/403/200 with no authority drift | `tests/internal-systems.test.ts` |
-| GraphQL/legacy | invalid query, fixed-width billing state | reject bad query, redact legacy account | `tests/internal-systems.test.ts` |
-| Live snapshot | reset/read/approved states | show real backend state and protocol frames | `tests/internal-systems.test.ts`, `e2e/demo.spec.ts` |
-| Connector/audit | audit append failure | rollback mutation and idempotency | `tests/workflow.test.ts` |
-| Evidence | missing audit replay/diffs | export typed packet | `tests/workflow.test.ts` |
-| Approval | duplicate batch submit | no duplicate operations | `tests/workflow.test.ts` |
-| Retry | REST timeout after write | recover with idempotency key | `tests/workflow.test.ts`, `e2e/demo.spec.ts` |
-| Planner | mocked success, malformed JSON, schema failure, fallback | stable plan source | `tests/planner.test.ts` |
-| Demo UI | happy path, blocked role, retry, prompt injection, mobile, nav | reviewer workflow proof | `e2e/demo.spec.ts` |
-
-## Verification
-
-`npm run verify` chains:
-
-```text
-npm run lint -> npm test -> npm run build -> npm run test:e2e
-```
-
-`lint` currently aliases `typecheck` because `next lint` is no longer available in the installed Next.js version.
+`npm run verify` runs typecheck, unit/integration tests, production build, and Playwright E2E.

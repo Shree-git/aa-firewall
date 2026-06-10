@@ -2,56 +2,60 @@
 
 ## Product Thesis
 
-Large enterprises depend on brittle internal scripts, dashboards, and human runbooks that break when key operators leave or when workflows span too many private systems. AA Firewall is a secure agent execution layer that runs behind the firewall and turns natural language into controlled, audited internal operations.
+Large companies run critical operations through brittle dashboards, scripts, shared spreadsheets, and legacy terminals. The problem is not that operators lack intent; it is that intent has to be translated by hand across private systems, tribal knowledge, approvals, and compliance evidence. When the key operator leaves or the workflow spans too many systems, the process breaks.
 
-The wedge is access-sensitive employee offboarding. It is common, painful, compliance-relevant, and requires real multi-system coordination: read identity and access state, inspect customer escalations, transfer ownership, revoke access, disable legacy billing, and produce evidence.
+AA Firewall is a secure behind-the-firewall agent framework that turns natural-language operations requests into typed, policy-gated, auditable internal actions. The prototype wedge is employee offboarding because it is frequent, access-sensitive, compliance-relevant, and naturally multi-system: identity, access grants, customer tickets, directory ownership, legacy billing, approval, and evidence.
 
 ## Target User and Buyer
 
-Primary user: IT operations, security operations, and internal platform teams responsible for access cleanup, ticket ownership transfer, and legacy system administration.
+Primary users are IT Operations, SecOps, and internal platform teams that clean up access, transfer ownership, and maintain internal systems. Their pain is repetitive operational work that is too sensitive to fully automate with a normal script and too cross-system to keep reliable as a human checklist.
 
-Economic buyer: CIO, CISO, or VP Internal Tools at a large enterprise where internal ops workflows are fragile, access-sensitive, and hard to audit.
+Economic buyers are CIOs, CISOs, and VPs of Internal Tools at enterprises with fragmented internal systems, audit pressure, and high cost of operational mistakes. They buy because the product reduces manual toil while preserving the controls they need: RBAC, scoped authority, approval, idempotency, and audit replay.
+
+The beachhead buyer pain is urgent because offboarding failures are both operational and regulatory: an employee can retain access, customer escalations can lose an owner, and compliance teams may not have evidence that cleanup actually happened.
 
 ## Prototype Workflow
 
-The user asks:
+The demo starts with one natural-language request:
 
-> Offboard Alex Chen effective today: find all systems Alex has access to, check open customer escalations, transfer ownership to Priya Shah, revoke SaaS and database access, disable legacy billing access, and produce an audit report.
+> Offboard Alex Chen effective today: find systems Alex has access to, check open customer escalations, transfer ownership to Priya Shah, revoke SaaS and database access, disable legacy billing access, and produce an audit report.
 
-The app shows natural-language intake, typed plan generation, simulated SSO/RBAC, policy decisions, connector execution, signed capabilities, a single batch approval gate for destructive writes, retry recovery, prompt-injection containment, and evidence export.
+AA Firewall converts that request into a typed plan. Read steps execute after policy evaluation. Destructive write steps wait behind one batch approval gate. After approval, the broker mints short-lived capabilities and executes connector actions against protocol-faithful local enterprise stand-ins:
 
-## Current Scope
+- Internal DB: employee row and access grants.
+- REST Ticketing: open tickets and ownership transfer.
+- GraphQL Directory: manager relationship lookup.
+- Legacy Billing: fixed-width billing record disable.
 
-In scope:
+The `Live Systems` panel is the core product proof: before approval, the systems show Alex's real seeded backend state; after approval, the same systems visibly mutate. The `Security Probe` proves endpoint gating with missing-token `401`, wrong-scope `403`, and valid-write-token `200`. The evidence packet exports approvals, capabilities, tool calls, audit replay, and redacted before/after state diffs.
 
-- Next.js TypeScript runnable prototype.
-- Simulated SSO/RBAC through signed demo sessions.
-- SQLite-backed mock internal DB, REST tickets, GraphQL directory, and legacy billing connectors.
-- Policy-gated broker and HMAC-signed short-lived capabilities.
-- Tool/action/resource/scope capability binding.
-- Batch approval for destructive write actions.
-- SQLite transactions around connector mutation and audit append.
-- Chain-hashed audit trail and evidence export with redacted before/after diffs.
-- Negative demos for unauthorized role, prompt injection, and REST timeout after write.
+The prototype is intentionally more than a chat wrapper. Reviewers can inspect source code and tests for signed sessions, scoped capabilities, internal protocol routes, transactional connector writes, and chain-hashed audit export.
 
-Out of scope:
+## Wedge to Platform
 
-- Real OIDC/LDAP/SAML.
-- OPA/Cedar policy engine.
-- Production connector marketplace.
-- HA/scaling/secrets rotation.
-- Compliance certification.
+```mermaid
+flowchart LR
+  A["Employee offboarding"] --> B["Access reviews"]
+  B --> C["Vendor onboarding"]
+  C --> D["Finance operations"]
+  D --> E["Compliance evidence"]
+  E --> F["Enterprise agent control plane"]
+```
+
+The wedge is intentionally narrow: one access-sensitive IT workflow with enough connector breadth and security depth to prove the framework. The platform path is to add real enterprise auth, customer connectors, richer policy engines, and reusable workflow templates. The long-term product becomes the safe execution layer for internal agents behind the firewall.
+
+The first expansion would be adjacent access and ownership workflows: quarterly access reviews, vendor onboarding, mailbox or queue reassignment, finance exception cleanup, and audit evidence collection. Each reuses the same control plane while adding connectors and workflow templates.
 
 ## Success Criteria
 
-- `npm run dev` starts a runnable prototype.
-- `npm test` validates signed sessions, API route errors, policy, capabilities, transactions, planner fallback, evidence export, duplicate batch approval, retry recovery, and prompt-injection containment.
-- `npm run verify` covers typecheck/lint, unit tests, production build, and Playwright E2E.
-- The happy path changes seeded state exactly once per write action.
-- Unauthorized actors are denied before destructive capabilities are minted.
-- Failed connector steps can pause and retry without duplicate writes.
-- Evidence packet includes actor, prompt, plan, approvals, policy decisions, capabilities, tool calls, full audit replay, audit root hash, and real redacted state diffs.
+- A reviewer can run the prototype locally with `npm run dev`.
+- The happy path changes backend state through gated connector operations, not dashboard-only state.
+- Unauthorized actors are blocked before destructive capabilities mint.
+- A read token cannot perform a write; wrong-scope calls return `403`.
+- Approval produces visible ticket transfer, access revocation, legacy billing disablement, and audit evidence.
+- Negative demos show prompt-injection containment and REST retry recovery.
+- Source code and tests verify the claims through unit, integration, build, and Playwright E2E coverage.
 
-## Wedge-to-Platform Path
+## Current Non-Goals
 
-Start with access-sensitive IT operations. Add real enterprise auth, customer-specific connectors, richer policy engines, and admin tooling. Expand from offboarding into vendor onboarding, finance operations, compliance evidence collection, customer escalation cleanup, and internal data workflow repair. The platform becomes the broker for safe agent actions behind the firewall.
+This prototype does not claim production OIDC/SAML/LDAP integration, a production connector marketplace, OPA/Cedar policy authoring, HA/scaling, secrets rotation, or compliance certification. Those are platform extensions after the wedge proves that secure natural-language-to-action workflows can operate against internal systems with enterprise controls.
